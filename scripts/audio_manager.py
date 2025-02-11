@@ -109,7 +109,7 @@ class AudioManager:
         self.pa = pyaudio.PyAudio()
         self.last_config_check = 0
         self.last_config_mtime = 0
-        self.config_check_interval = 0.5  # Check every 500ms
+        self.config_check_interval = 1.0  # Check every 1s
         self.load_config()
         self.initialize_devices()
 
@@ -304,17 +304,16 @@ class AudioManager:
 
     def should_process_audio(self):
         """Check if current audio should be processed based on process filters"""
+        # First check if filtering is enabled
+        filter_type = self.config.get('Settings', 'filter_type', fallback='none')
+        if filter_type == 'none':
+            return True
+        
         try:
-            # Get the foreground window
+            # Only check process if filtering is enabled
             hwnd = win32gui.GetForegroundWindow()
-            # Get the process ID
             _, pid = win32process.GetWindowThreadProcessId(hwnd)
-            # Get the process name
             process_name = psutil.Process(pid).name().lower()
-            
-            filter_type = self.config.get('Settings', 'filter_type', fallback='none')
-            if filter_type == 'none':
-                return True
             
             # Get the process list (ignore comments and empty lines)
             process_list = {
@@ -328,8 +327,9 @@ class AudioManager:
                 return process_name not in process_list
             
         except Exception as e:
-            print(f"Error checking process filter: {e}")
-            return True  # Default to allowing audio if there's an error
+            # Only print error if filtering is enabled
+            print_status(f"\nError checking process filter: {e}", "error")
+            return True
         
         return True
 
@@ -432,15 +432,29 @@ class AudioManager:
 
     def get_status_string(self):
         """Get current status string for display"""
-        status = []
-        for name, device in self.devices.items():
-            status.append(f"{name}: vol={device.volume:.2f} lat={device.latency:.3f}s")
+        status_lines = []
         
+        # Add device statuses
+        for name, device in self.devices.items():
+            device_name = self.config['Devices'][name]
+            # Truncate device name if too long
+            if len(device_name) > 30:
+                device_name = device_name[:27] + "..."
+            
+            status_lines.append(
+                f"{Fore.CYAN}{device_name}{Style.RESET_ALL}: "
+                f"Vol={Fore.GREEN}{device.volume:.2f}{Style.RESET_ALL} "
+                f"Lat={Fore.YELLOW}{device.latency*1000:.0f}ms{Style.RESET_ALL}"
+            )
+        
+        # Add filter status if enabled
         filter_type = self.config.get('Settings', 'filter_type', fallback='none')
         if filter_type != 'none':
-            status.append(f"Filter: {filter_type}")
+            filter_status = f"Filter: {Fore.MAGENTA}{filter_type.upper()}{Style.RESET_ALL}"
+            status_lines.append(filter_status)
         
-        return " | ".join(status)
+        # Join with separator
+        return " │ ".join(status_lines)
 
     def reset_config(self):
         """Reset configuration file"""

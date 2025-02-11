@@ -58,13 +58,15 @@ def main():
     
     try:
         manager.start_audio()
-        print_status("Audio streaming started. Press Ctrl+C to stop", "success")
+        print_status("Audio streaming started. Press Ctrl+C to stop\n", "success")
         
         last_status = ""
         while True:
             # Update status line with current settings
             status = manager.get_status_string()
             if status != last_status:
+                # Clear the line before printing new status
+                print(f"\r{' ' * len(last_status.strip())}\r", end='')
                 print_status(status, "info")
                 last_status = status
             time.sleep(0.1)
