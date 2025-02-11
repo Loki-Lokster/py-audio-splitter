@@ -1,2 +1,4 @@
 settings.cfg
 *.pyc
+/logs
+/__pycache__

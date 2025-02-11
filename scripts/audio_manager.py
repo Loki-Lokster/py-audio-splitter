@@ -4,7 +4,9 @@ import configparser
 from typing import Dict, Optional
 import time
 import os
-from .utils import print_status, get_user_choice, Colors
+from .utils import print_status, get_user_choice, Colors, print_virtual_cable_info, create_windows_shortcut, create_mac_shortcut
+import platform
+import logging
 
 class AudioDevice:
     def __init__(self, name: str, device_index: int):
@@ -110,6 +112,7 @@ class AudioManager:
         self.last_config_check = 0
         self.last_config_mtime = 0
         self.config_check_interval = 1.0  # Check every 1s
+        self.max_devices = 8  # Set a reasonable maximum
         self.load_config()
         self.initialize_devices()
 
@@ -128,75 +131,98 @@ class AudioManager:
         
         print_status("Available audio output devices:\n", "info")
         
-        # Group devices by type
+        # Group devices by type with better formatting
         grouped_devices = {}
         device_indices = {}  # To store the mapping of display index to device name
+        current_index = 1
+        
         for device in devices:
             device_type = device.split('(')[0].strip()
             if device_type not in grouped_devices:
                 grouped_devices[device_type] = []
             grouped_devices[device_type].append(device)
+            device_indices[current_index] = device
+            current_index += 1
         
-        # Print grouped devices
-        current_index = 1
+        # Print grouped devices with clear separation
         for device_type in sorted(grouped_devices.keys()):
             print(f"\n{Colors.YELLOW}{device_type}:{Colors.RESET}")
             for device in grouped_devices[device_type]:
-                print(f"{Colors.WHITE}{current_index:2d}. {device}{Colors.RESET}")
-                device_indices[current_index] = device
-                current_index += 1
+                idx = list(device_indices.keys())[list(device_indices.values()).index(device)]
+                print(f"{Colors.WHITE}{idx:2d}. {device.strip()}{Colors.RESET}")
         
         try:
-            # Get first device
+            # Get number of devices
             while True:
-                choice1 = input(f"\n{Colors.CYAN}Select first device (enter number): {Colors.RESET}")
-                if choice1.isdigit() and 1 <= int(choice1) < current_index:
-                    device1 = device_indices[int(choice1)]
+                device_count = input(f"\n{Colors.CYAN}How many output devices? (2-{self.max_devices}): {Colors.RESET}")
+                if device_count.isdigit() and 2 <= int(device_count) <= self.max_devices:
+                    device_count = int(device_count)
                     break
-                print(f"{Colors.RED}Invalid choice. Please enter a number from the list.{Colors.RESET}")
-            
-            # Get second device
-            while True:
-                choice2 = input(f"{Colors.CYAN}Select second device (enter number): {Colors.RESET}")
-                if choice2.isdigit() and 1 <= int(choice2) < current_index:
-                    if choice2 != choice1:
-                        device2 = device_indices[int(choice2)]
+                print(f"{Colors.RED}Please enter a number between 2 and {self.max_devices}{Colors.RESET}")
+
+            # Store selected devices and their settings
+            selected_devices = {}
+            device_volumes = {}
+
+            # Get devices and volumes
+            for i in range(device_count):
+                # Get device
+                while True:
+                    choice = input(f"\n{Colors.CYAN}Select device {i+1} (enter number): {Colors.RESET}")
+                    if choice.isdigit() and 1 <= int(choice) < current_index:
+                        if choice not in selected_devices.values():
+                            device = device_indices[int(choice)]
+                            selected_devices[f'device_{i+1}'] = device
+                            break
+                        print(f"{Colors.RED}Device already selected. Please choose another.{Colors.RESET}")
+                    else:
+                        print(f"{Colors.RED}Invalid choice. Please enter a number from the list.{Colors.RESET}")
+                
+                # Get volume
+                while True:
+                    vol = input(f"{Colors.CYAN}Enter volume for device {i+1} (0.0-1.0) [default: 1.0]: {Colors.RESET}").strip()
+                    if not vol:
+                        vol = "1.0"
+                    if vol.replace(".", "").isdigit() and 0 <= float(vol) <= 1:
+                        device_volumes[f'device_{i+1}_volume'] = vol
                         break
-                    print(f"{Colors.RED}Please select a different device than the first one.{Colors.RESET}")
-                else:
-                    print(f"{Colors.RED}Invalid choice. Please enter a number from the list.{Colors.RESET}")
-            
-            # Get volumes
-            while True:
-                vol1 = input(f"{Colors.CYAN}Enter volume for device 1 (0.0-1.0) [default: 1.0]: {Colors.RESET}").strip()
-                if not vol1:
-                    vol1 = "1.0"
-                if vol1.replace(".", "").isdigit() and 0 <= float(vol1) <= 1:
-                    break
-                print(f"{Colors.RED}Invalid volume. Please enter a number between 0.0 and 1.0{Colors.RESET}")
-            
-            while True:
-                vol2 = input(f"{Colors.CYAN}Enter volume for device 2 (0.0-1.0) [default: 1.0]: {Colors.RESET}").strip()
-                if not vol2:
-                    vol2 = "1.0"
-                if vol2.replace(".", "").isdigit() and 0 <= float(vol2) <= 1:
-                    break
-                print(f"{Colors.RED}Invalid volume. Please enter a number between 0.0 and 1.0{Colors.RESET}")
+                    print(f"{Colors.RED}Invalid volume. Please enter a number between 0.0 and 1.0{Colors.RESET}")
             
             # Create the config
-            self.config['Devices'] = {
-                'device_1': device1,
-                'device_2': device2
-            }
+            self.config['Devices'] = selected_devices
             self.config['Settings'] = {
-                'device_1_volume': vol1,
-                'device_1_latency': '0.0',
-                'device_2_volume': vol2,
-                'device_2_latency': '0.0'
+                'device_count': str(device_count),
+                **device_volumes
             }
+            
+            # Add default latency settings
+            for i in range(device_count):
+                self.config['Settings'][f'device_{i+1}_latency'] = '0.0'
             
             self.save_config()
             print_status("\nConfiguration saved! You can edit volumes and latency in settings.cfg", "success")
+            
+            # Ask about creating shortcut
+            os_type = platform.system()
+            if os_type in ['Windows', 'Darwin']:  # Darwin is macOS
+                create_shortcut = get_user_choice(
+                    "\nWould you like to create a desktop shortcut? (y/n): ",
+                    {'y', 'n'}
+                )
+                
+                if create_shortcut == 'y':
+                    script_path = os.path.join(self.script_dir, 'audio_split.py')
+                    success = False
+                    
+                    if os_type == 'Windows':
+                        success = create_windows_shortcut(script_path)
+                    else:  # macOS
+                        success = create_mac_shortcut(script_path)
+                    
+                    if success:
+                        print_status("Desktop shortcut created successfully!", "success")
+            
+            print_status("\nSetup complete! Starting application...", "success")
             
         except KeyboardInterrupt:
             print_status("\nSetup cancelled.", "warning")
@@ -208,21 +234,42 @@ class AudioManager:
         if not self.config['Devices']:
             return
         
+        device_count = self.config.getint('Settings', 'device_count', fallback=2)
+        logging.info(f"Initializing {device_count} devices")
+        
+        # Check for virtual cable
+        virtual_cable_found = False
+        for i in range(self.pa.get_device_count()):
+            device_info = self.pa.get_device_info_by_index(i)
+            if 'CABLE' in device_info['name']:
+                virtual_cable_found = True
+                logging.info("Virtual Cable found")
+                break
+        
+        if not virtual_cable_found:
+            logging.warning("Virtual Cable not found")
+            print_virtual_cable_info()
+        
         # Find and initialize all configured audio devices
-        for device_name in self.config['Devices']:
-            device_friendly_name = self.config['Devices'][device_name]
-            device_index = self._find_device_index(device_friendly_name)
-            
-            if device_index is not None:
-                self.devices[device_name] = AudioDevice(device_friendly_name, device_index)
+        for i in range(1, device_count + 1):
+            device_name = f'device_{i}'
+            if device_name in self.config['Devices']:
+                device_friendly_name = self.config['Devices'][device_name]
+                device_index = self._find_device_index(device_friendly_name)
                 
-                # Apply initial settings
-                if self.config.has_section('Settings'):
-                    volume = self.config.getfloat('Settings', f'{device_name}_volume', fallback=1.0)
-                    latency = self.config.getfloat('Settings', f'{device_name}_latency', fallback=0.0)
-                    self.update_device_settings(device_name, volume, latency)
-            else:
-                print(f"Warning: Configured device '{device_friendly_name}' not found")
+                if device_index is not None:
+                    logging.info(f"Initializing device: {device_friendly_name} (index: {device_index})")
+                    self.devices[device_name] = AudioDevice(device_friendly_name, device_index)
+                    
+                    # Apply initial settings
+                    if self.config.has_section('Settings'):
+                        volume = self.config.getfloat('Settings', f'{device_name}_volume', fallback=1.0)
+                        latency = self.config.getfloat('Settings', f'{device_name}_latency', fallback=0.0)
+                        self.update_device_settings(device_name, volume, latency)
+                        logging.info(f"Applied settings for {device_name}: volume={volume}, latency={latency}")
+                else:
+                    logging.error(f"Device not found: {device_friendly_name}")
+                    print_status(f"Warning: Configured device '{device_friendly_name}' not found", "warning")
 
     def _find_device_index(self, device_name: str) -> Optional[int]:
         for i in range(self.pa.get_device_count()):
@@ -295,6 +342,7 @@ class AudioManager:
         return True
 
     def start_audio(self):
+        logging.info("Starting audio streams")
         def create_device_callback(device):
             def callback(in_data, frame_count, time_info, status):
                 # Check for config updates
@@ -326,6 +374,7 @@ class AudioManager:
             device.open_stream(create_device_callback(device))
 
     def stop_audio(self):
+        logging.info("Stopping audio streams")
         for device in self.devices.values():
             device.close_stream()
 
@@ -395,7 +444,14 @@ class AudioManager:
         """Get current status string for display"""
         status_lines = []
         
+        # Add header with controls
+        status_lines.append(f"{Colors.WHITE}Controls:{Colors.RESET}")
+        status_lines.append(f"  {Colors.CYAN}Ctrl+C{Colors.RESET} to stop application")
+        status_lines.append(f"  Edit {Colors.YELLOW}settings.cfg{Colors.RESET} to adjust volumes/latency")
+        status_lines.append("")  # Empty line for spacing
+        
         # Add device statuses
+        status_lines.append(f"{Colors.WHITE}Devices:{Colors.RESET}")
         for name, device in self.devices.items():
             device_name = self.config['Devices'][name]
             # Truncate device name if too long
@@ -403,9 +459,9 @@ class AudioManager:
                 device_name = device_name[:27] + "..."
             
             status_lines.append(
-                f"{Colors.CYAN}{device_name}{Colors.RESET}:\n"
-                f"  Volume: {Colors.GREEN}{device.volume:.2f}{Colors.RESET}\n"
-                f"  Latency: {Colors.YELLOW}{device.latency*1000:.0f}ms{Colors.RESET}"
+                f"  {Colors.CYAN}{device_name}{Colors.RESET}:"
+                f"\n    Volume: {Colors.GREEN}{device.volume:.2f}{Colors.RESET}"
+                f"\n    Latency: {Colors.YELLOW}{device.latency*1000:.0f}ms{Colors.RESET}"
             )
         
         return "\n".join(status_lines)
