@@ -1,10 +1,9 @@
 import argparse
-from scripts.utils import print_header, print_status, clear_screen
+from scripts.utils import print_header, print_status, Colors, clear_screen
 from scripts.audio_manager import AudioManager
 import time
 import signal
 import sys
-from colorama import Fore, Style
 
 def signal_handler(sig, frame):
     print_status("\nShutting down...", "warning")
@@ -35,7 +34,6 @@ def main():
         # Group devices by type
         grouped_devices = {}
         for device in devices:
-            # Get device type (before parentheses)
             device_type = device.split('(')[0].strip()
             if device_type not in grouped_devices:
                 grouped_devices[device_type] = []
@@ -44,9 +42,9 @@ def main():
         # Print grouped devices
         current_index = 1
         for device_type in sorted(grouped_devices.keys()):
-            print(f"\n{Fore.YELLOW}{device_type}:{Style.RESET_ALL}")
+            print(f"\n{Colors.YELLOW}{device_type}:{Colors.RESET}")
             for device in grouped_devices[device_type]:
-                print(f"{Fore.WHITE}{current_index:2d}. {device}{Style.RESET_ALL}")
+                print(f"{Colors.WHITE}{current_index:2d}. {device}{Colors.RESET}")
                 current_index += 1
         return
         
@@ -65,8 +63,8 @@ def main():
             # Update status line with current settings
             status = manager.get_status_string()
             if status != last_status:
-                # Clear the line before printing new status
-                print(f"\r{' ' * len(last_status.strip())}\r", end='')
+                clear_screen()
+                print_header()
                 print_status(status, "info")
                 last_status = status
             time.sleep(0.1)

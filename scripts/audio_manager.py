@@ -4,11 +4,7 @@ import configparser
 from typing import Dict, Optional
 import time
 import os
-import psutil
-import win32gui
-import win32process
-from .utils import print_status, get_user_choice
-from colorama import Fore, Style
+from .utils import print_status, get_user_choice, Colors
 
 class AudioDevice:
     def __init__(self, name: str, device_index: int):
@@ -144,54 +140,48 @@ class AudioManager:
         # Print grouped devices
         current_index = 1
         for device_type in sorted(grouped_devices.keys()):
-            print(f"\n{Fore.YELLOW}{device_type}:{Style.RESET_ALL}")
+            print(f"\n{Colors.YELLOW}{device_type}:{Colors.RESET}")
             for device in grouped_devices[device_type]:
-                print(f"{Fore.WHITE}{current_index:2d}. {device}{Style.RESET_ALL}")
+                print(f"{Colors.WHITE}{current_index:2d}. {device}{Colors.RESET}")
                 device_indices[current_index] = device
                 current_index += 1
         
         try:
             # Get first device
             while True:
-                choice1 = input(f"\n{Fore.CYAN}Select first device (enter number): {Style.RESET_ALL}")
+                choice1 = input(f"\n{Colors.CYAN}Select first device (enter number): {Colors.RESET}")
                 if choice1.isdigit() and 1 <= int(choice1) < current_index:
                     device1 = device_indices[int(choice1)]
                     break
-                print(f"{Fore.RED}Invalid choice. Please enter a number from the list.{Style.RESET_ALL}")
+                print(f"{Colors.RED}Invalid choice. Please enter a number from the list.{Colors.RESET}")
             
             # Get second device
             while True:
-                choice2 = input(f"{Fore.CYAN}Select second device (enter number): {Style.RESET_ALL}")
+                choice2 = input(f"{Colors.CYAN}Select second device (enter number): {Colors.RESET}")
                 if choice2.isdigit() and 1 <= int(choice2) < current_index:
                     if choice2 != choice1:
                         device2 = device_indices[int(choice2)]
                         break
-                    print(f"{Fore.RED}Please select a different device than the first one.{Style.RESET_ALL}")
+                    print(f"{Colors.RED}Please select a different device than the first one.{Colors.RESET}")
                 else:
-                    print(f"{Fore.RED}Invalid choice. Please enter a number from the list.{Style.RESET_ALL}")
+                    print(f"{Colors.RED}Invalid choice. Please enter a number from the list.{Colors.RESET}")
             
             # Get volumes
             while True:
-                vol1 = input(f"{Fore.CYAN}Enter volume for device 1 (0.0-1.0) [default: 1.0]: {Style.RESET_ALL}").strip()
+                vol1 = input(f"{Colors.CYAN}Enter volume for device 1 (0.0-1.0) [default: 1.0]: {Colors.RESET}").strip()
                 if not vol1:
                     vol1 = "1.0"
                 if vol1.replace(".", "").isdigit() and 0 <= float(vol1) <= 1:
                     break
-                print(f"{Fore.RED}Invalid volume. Please enter a number between 0.0 and 1.0{Style.RESET_ALL}")
+                print(f"{Colors.RED}Invalid volume. Please enter a number between 0.0 and 1.0{Colors.RESET}")
             
             while True:
-                vol2 = input(f"{Fore.CYAN}Enter volume for device 2 (0.0-1.0) [default: 1.0]: {Style.RESET_ALL}").strip()
+                vol2 = input(f"{Colors.CYAN}Enter volume for device 2 (0.0-1.0) [default: 1.0]: {Colors.RESET}").strip()
                 if not vol2:
                     vol2 = "1.0"
                 if vol2.replace(".", "").isdigit() and 0 <= float(vol2) <= 1:
                     break
-                print(f"{Fore.RED}Invalid volume. Please enter a number between 0.0 and 1.0{Style.RESET_ALL}")
-            
-            # Ask about process filtering
-            filter_type = get_user_choice(
-                "Do you want to use an allow list or block list for applications? (a/b) [default: none]: ",
-                {'a', 'b', ''}
-            )
+                print(f"{Colors.RED}Invalid volume. Please enter a number between 0.0 and 1.0{Colors.RESET}")
             
             # Create the config
             self.config['Devices'] = {
@@ -202,17 +192,11 @@ class AudioManager:
                 'device_1_volume': vol1,
                 'device_1_latency': '0.0',
                 'device_2_volume': vol2,
-                'device_2_latency': '0.0',
-                'filter_type': 'allow' if filter_type == 'a' else 'block' if filter_type == 'b' else 'none'
-            }
-            self.config['ProcessFilter'] = {
-                '# Add processes here (one per line)': '',
-                '# Example for allow list: spotify.exe': '',
-                '# Example for block list: discord.exe': ''
+                'device_2_latency': '0.0'
             }
             
             self.save_config()
-            print_status("\nConfiguration saved! You can edit volumes, latency, and process filters in settings.cfg", "success")
+            print_status("\nConfiguration saved! You can edit volumes and latency in settings.cfg", "success")
             
         except KeyboardInterrupt:
             print_status("\nSetup cancelled.", "warning")
@@ -307,34 +291,7 @@ class AudioManager:
             self.config = old_config
 
     def should_process_audio(self):
-        """Check if current audio should be processed based on process filters"""
-        # First check if filtering is enabled
-        filter_type = self.config.get('Settings', 'filter_type', fallback='none')
-        if filter_type == 'none':
-            return True
-        
-        try:
-            # Only check process if filtering is enabled
-            hwnd = win32gui.GetForegroundWindow()
-            _, pid = win32process.GetWindowThreadProcessId(hwnd)
-            process_name = psutil.Process(pid).name().lower()
-            
-            # Get the process list (ignore comments and empty lines)
-            process_list = {
-                p.lower() for p in self.config['ProcessFilter'].keys()
-                if not p.startswith('#') and p.strip()
-            }
-            
-            if filter_type == 'allow':
-                return process_name in process_list
-            elif filter_type == 'block':
-                return process_name not in process_list
-            
-        except Exception as e:
-            # Only print error if filtering is enabled
-            print_status(f"\nError checking process filter: {e}", "error")
-            return True
-        
+        """Always process audio now that filtering is removed"""
         return True
 
     def start_audio(self):
@@ -347,7 +304,7 @@ class AudioManager:
                     device.buffer_position = 0
                 
                 # Convert input data to numpy array
-                if in_data and self.should_process_audio():  # Only process if allowed
+                if in_data:  # Always process
                     audio_data = np.frombuffer(in_data, dtype=np.float32)
                     audio_data = audio_data.reshape((frame_count, 2))
                     
@@ -446,19 +403,12 @@ class AudioManager:
                 device_name = device_name[:27] + "..."
             
             status_lines.append(
-                f"{Fore.CYAN}{device_name}{Style.RESET_ALL}: "
-                f"Vol={Fore.GREEN}{device.volume:.2f}{Style.RESET_ALL} "
-                f"Lat={Fore.YELLOW}{device.latency*1000:.0f}ms{Style.RESET_ALL}"
+                f"{Colors.CYAN}{device_name}{Colors.RESET}:\n"
+                f"  Volume: {Colors.GREEN}{device.volume:.2f}{Colors.RESET}\n"
+                f"  Latency: {Colors.YELLOW}{device.latency*1000:.0f}ms{Colors.RESET}"
             )
         
-        # Add filter status if enabled
-        filter_type = self.config.get('Settings', 'filter_type', fallback='none')
-        if filter_type != 'none':
-            filter_status = f"Filter: {Fore.MAGENTA}{filter_type.upper()}{Style.RESET_ALL}"
-            status_lines.append(filter_status)
-        
-        # Join with separator
-        return " │ ".join(status_lines)
+        return "\n".join(status_lines)
 
     def reset_config(self):
         """Reset configuration file"""
@@ -483,12 +433,21 @@ def main():
     
     try:
         manager.start_audio()
-        print("Audio streaming started. Press Ctrl+C to stop")
+        print_status("Audio streaming started. Press Ctrl+C to stop\n", "success")
+        
+        last_status = ""
         while True:
-            time.sleep(1)
+            # Update status line with current settings
+            status = manager.get_status_string()
+            if status != last_status:
+                clear_screen()
+                print_header()
+                print_status(status, "info")
+                last_status = status
+            time.sleep(0.1)
             
     except KeyboardInterrupt:
-        manager.stop_audio()
+        print_status("\nShutting down...", "warning")
     except ValueError as e:
         print(f"Error: {e}")
 
