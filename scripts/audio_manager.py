@@ -103,7 +103,11 @@ class AudioDevice:
 
 class AudioManager:
     def __init__(self, config_path='settings.cfg'):
-        self.config_path = config_path
+        # Get the directory where the script is located
+        self.script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # Make config path absolute relative to script directory
+        self.config_path = os.path.join(self.script_dir, config_path)
+        
         self.config = configparser.ConfigParser()
         self.devices: Dict[str, AudioDevice] = {}
         self.pa = pyaudio.PyAudio()
