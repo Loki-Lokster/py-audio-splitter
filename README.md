@@ -88,21 +88,39 @@ This setup allows you to isolate and capture audio from specific applications wh
    device_2_latency = 0.0
    ```
 
-   - `volume`: Range 0.0 to 1.0 (0% to 100%)
-   - `latency`: Delay in seconds (e.g., 0.08 = 80ms)
+   - Output settings:
+     - `device_N_volume`: Range `0.0` to `1.0` (0% to 100%)
+     - `device_N_latency`: Delay in seconds (e.g., `0.08` = 80ms)
+   - Stream settings (restart required):
+     - `input_device`: Substring match for the input/capture device (defaults to `CABLE Output` if present)
+     - `sample_rate`, `channels`, `frames_per_buffer`
+   - Drift compensation (restart required):
+     - `base_buffer`: Base buffer in seconds (higher = more stable, more latency)
+     - `drift_kp`: Controller strength
+     - `drift_max_rate`: Max time-stretch rate (e.g., `0.001` = 1000 ppm)
+     - `drift_log_interval`: Min seconds between drift log messages
+     - `drift_persist`: Seconds drift must persist before logging
 
 3. **Commands**
    - List available devices: `python audio_split.py --list-devices`
    - Reset configuration: `python audio_split.py --reset-config`
    - Show version: `python audio_split.py --version`
    - Use classic auto-refresh UI: `python audio_split.py --ui classic`
-   - In REPL UI mode: `list outputs` → `add output <i|text>` / `remove output <N|text>` / `set output <N> <i>` to manage outputs without editing `settings.cfg`
 
 4. **Controls**
    - `Ctrl+C`: Stop the application
    - Edit `settings.cfg` to adjust volumes and latency (changes apply immediately)
    - In REPL UI mode, type `help` to see interactive commands
-   - To re-run the interactive setup wizard from the REPL: `wizard`
+   - In watch mode, `Ctrl+C` returns to the REPL
+
+5. **CLI Quick Start**
+   - Show available devices: `list outputs`, `list inputs`
+   - Show configured outputs: `outputs`
+   - Add/remove outputs without editing `settings.cfg`:
+     - `add output <i|text>`
+     - `remove output <N|text>`
+     - `set output <N> <i>` (replace `device_N`)
+   - Re-run setup wizard: `wizard`
 
 ## Troubleshooting
 
@@ -133,16 +151,14 @@ This setup allows you to isolate and capture audio from specific applications wh
 6. **Devices Drift Out Of Sync Over Time**
    - Different output devices have independent hardware clocks, so perfect long-term sync requires drift compensation
    - This project applies lightweight drift compensation by slightly time-stretching each output (shown as `rate …ppm` in the REPL UI)
-   - If you see frequent drift warnings, increase `base_buffer` slightly (e.g. `0.35`) or keep the device sample rates consistent in Windows
+   - If you see frequent drift warnings, increase `base_buffer` slightly (e.g. `0.35`) and/or increase `drift_log_interval`
 
-## Latency Auto-Detection (Optional)
+7. **Latency Auto-Detection (Optional)**
+   - Automatically finding the “best latency” between two output devices is only possible if you can **measure both signals**
+   - Recommended approach: place a microphone where it can hear both devices, play a short calibration sound, and use cross-correlation to estimate the offset
+   - Without a microphone/loopback capture path, the program cannot know the *acoustic* delay of a wireless headset vs speakers; it can only keep them from drifting once aligned
 
-Automatically finding the “best latency” between two output devices is only possible if you can **measure both signals**.
-
-- **Recommended approach**: place a microphone where it can hear both devices, then play a short calibration sound and use cross-correlation to estimate the offset.
-- Without a microphone/loopback capture path, the program cannot know the *acoustic* delay of a wireless headset vs speakers; it can only keep them from drifting once aligned.
-
-7. **Volume Too Low / Need 100% On Other Devices**
+8. **Volume Too Low / Need 100% On Other Devices**
    - Audio Splitter does not override Windows per-device volume or Volume Mixer settings; it applies only the per-device `device_N_volume` multiplier from `settings.cfg`
    - Check Windows Sound settings for the relevant device levels (including `CABLE Output` recording level if you route through VB-Cable)
 

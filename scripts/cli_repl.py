@@ -1,6 +1,8 @@
 import shlex
 import time
 import shutil
+import re
+import random
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -10,6 +12,12 @@ from .utils import Colors, clear_screen
 _BOLD = "\033[1m"
 _DIM = "\033[2m"
 _RESET = "\033[0m"
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _display_width(text: str) -> int:
+    return len(_ANSI_RE.sub("", text))
 
 
 @dataclass
@@ -23,6 +31,15 @@ class CliRepl:
     def __init__(self, manager):
         self.manager = manager
         self._last_message = ""
+        self._title_color = random.choice(
+            [
+                Colors.CYAN,
+                Colors.GREEN,
+                Colors.YELLOW,
+                Colors.BLUE,
+                Colors.WHITE,
+            ]
+        )
 
     def run(self):
         self._render()
@@ -343,8 +360,8 @@ class CliRepl:
         outputs = self.manager.get_output_device_rows()
 
         width = max(60, min(100, shutil.get_terminal_size(fallback=(80, 24)).columns))
-        title_text = f" {Colors.GREEN}Audio Splitter{Colors.RESET} v{info.get('version','')} "
-        pad = max(0, width - 2 - len(title_text))
+        title_text = f" {self._title_color}Audio Splitter{Colors.RESET} v{info.get('version','')} "
+        pad = max(0, width - 2 - _display_width(title_text))
         left_pad = pad // 2
         right_pad = pad - left_pad
         banner = [

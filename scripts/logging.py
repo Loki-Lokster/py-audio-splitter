@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 from .utils import print_status, Colors
 
-def setup_logging(log_dir=None):
+def setup_logging(log_dir=None, console: bool = True):
     """Setup logging configuration with log rotation"""
     if log_dir is None:
         log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logs')
@@ -54,10 +54,6 @@ def setup_logging(log_dir=None):
     file_handler = logging.FileHandler(log_file, encoding='utf-8')
     file_handler.setFormatter(file_formatter)
     
-    # Setup console handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(console_formatter)
-    
     # Setup root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
@@ -67,7 +63,10 @@ def setup_logging(log_dir=None):
     
     # Add our handlers
     root_logger.addHandler(file_handler)
-    root_logger.addHandler(console_handler)
+    if console:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(console_formatter)
+        root_logger.addHandler(console_handler)
     
     # Log system info at startup
     logging.info("=== Audio Splitter Started ===")

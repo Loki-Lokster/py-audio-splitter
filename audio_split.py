@@ -14,8 +14,6 @@ def signal_handler(sig, frame):
     sys.exit(0)
 
 def main():
-    # Setup logging first
-    log_file = setup_logging()
     manager = None
     ensure_utf8_console()
     
@@ -38,13 +36,17 @@ def main():
     
     args = parser.parse_args()
     
+    # Setup logging after parsing UI mode
+    log_file = setup_logging(console=(args.ui == 'classic'))
+
     # Setup signal handler for clean exit
     # In REPL mode we rely on Python's default SIGINT->KeyboardInterrupt so that
     # Ctrl+C can be handled contextually (e.g., exit watch mode without killing the app).
     if args.ui == 'classic':
         signal.signal(signal.SIGINT, signal_handler)
-    
-    print_header(version=__version__)
+
+    if args.ui == 'classic':
+        print_header(version=__version__)
     
     try:
         manager = AudioManager(args.config)
@@ -77,8 +79,9 @@ def main():
             return
         
         manager.start_audio()
-        print_status("Audio streaming started. Press Ctrl+C to stop\n", "success")
-
+        if args.ui == 'classic':
+            print_status("Audio streaming started. Press Ctrl+C to stop\n", "success")
+        
         if args.ui == 'classic':
             last_status = ""
             while True:
