@@ -156,12 +156,7 @@ This setup allows you to isolate and capture audio from specific applications wh
    - This project applies lightweight drift compensation by slightly time-stretching each output (shown as `rate …ppm` in the REPL UI)
    - If you see frequent drift warnings, increase `base_buffer` slightly (e.g. `0.35`) and/or increase `drift_log_interval`
 
-7. **Latency Auto-Detection (Optional)**
-   - Automatically finding the “best latency” between two output devices is only possible if you can **measure both signals**
-   - Recommended approach: place a microphone where it can hear both devices, play a short calibration sound, and use cross-correlation to estimate the offset
-   - Without a microphone/loopback capture path, the program cannot know the *acoustic* delay of a wireless headset vs speakers; it can only keep them from drifting once aligned
-
-8. **Volume Too Low / Need 100% On Other Devices**
+7. **Volume Too Low / Need 100% On Other Devices**
    - Audio Splitter does not override Windows per-device volume or Volume Mixer settings; it applies only the per-device `device_N_volume` multiplier from `settings.cfg`
    - Check Windows Sound settings for the relevant device levels (including `CABLE Output` recording level if you route through VB-Cable)
 
