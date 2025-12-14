@@ -1,6 +1,7 @@
 import argparse
 from scripts.utils import print_header, print_status, Colors, clear_screen, ensure_utf8_console
 from scripts.audio_manager import AudioManager
+from scripts.cli_repl import CliRepl
 from scripts.version import __version__
 from scripts.logging import setup_logging
 import time
@@ -27,11 +28,21 @@ def main():
                        help='List available audio devices and exit')
     parser.add_argument('--reset-config', action='store_true',
                        help='Reset configuration file')
+    parser.add_argument(
+        '--ui',
+        type=str,
+        choices=['repl', 'classic'],
+        default='repl',
+        help='UI mode: repl (interactive commands) or classic (auto-refresh status)',
+    )
     
     args = parser.parse_args()
     
     # Setup signal handler for clean exit
-    signal.signal(signal.SIGINT, signal_handler)
+    # In REPL mode we rely on Python's default SIGINT->KeyboardInterrupt so that
+    # Ctrl+C can be handled contextually (e.g., exit watch mode without killing the app).
+    if args.ui == 'classic':
+        signal.signal(signal.SIGINT, signal_handler)
     
     print_header(version=__version__)
     
@@ -67,17 +78,20 @@ def main():
         
         manager.start_audio()
         print_status("Audio streaming started. Press Ctrl+C to stop\n", "success")
-        
-        last_status = ""
-        while True:
-            # Update status line with current settings
-            status = manager.get_status_string()
-            if status != last_status:
-                clear_screen()
-                print_header(version=__version__)
-                print_status(status, "info")
-                last_status = status
-            time.sleep(0.1)
+
+        if args.ui == 'classic':
+            last_status = ""
+            while True:
+                # Update status line with current settings
+                status = manager.get_status_string()
+                if status != last_status:
+                    clear_screen()
+                    print_header(version=__version__)
+                    print_status(status, "info")
+                    last_status = status
+                time.sleep(0.1)
+        else:
+            CliRepl(manager).run()
             
     except KeyboardInterrupt:
         print_status("\nShutting down...", "warning")
@@ -87,7 +101,7 @@ def main():
         print_status(f"\nCheck the log file for details: {log_file}", "info")
     finally:
         if manager is not None:
-            manager.stop_audio()
+            manager.shutdown()
 
 if __name__ == "__main__":
     main()

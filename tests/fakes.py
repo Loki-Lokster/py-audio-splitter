@@ -30,6 +30,7 @@ class FakeStream:
         self.started = False
         self.closed = False
         self.writes: List[bytes] = []
+        self._time = 0.0
 
     def start_stream(self):
         self.started = True
@@ -41,6 +42,7 @@ class FakeStream:
         self.closed = True
 
     def read(self, frame_count: int, exception_on_overflow: bool = False) -> bytes:
+        self._time += float(frame_count) / float(self.rate)
         if self.format == 1:  # paFloat32
             data = np.zeros((frame_count, self.channels), dtype=np.float32)
             return data.tobytes()
@@ -51,6 +53,12 @@ class FakeStream:
 
     def write(self, data: bytes):
         self.writes.append(data)
+        bytes_per_sample = 4 if self.format == 1 else 2
+        frame_count = len(data) // (bytes_per_sample * self.channels)
+        self._time += float(frame_count) / float(self.rate)
+
+    def get_time(self) -> float:
+        return float(self._time)
 
 
 class FakePyAudio:
@@ -97,4 +105,3 @@ def make_pyaudio_module(devices: List[FakeDeviceInfo]):
     fake_module.paContinue = 0
     fake_module.PyAudio = lambda: FakePyAudio(devices)
     return fake_module
-

@@ -77,6 +77,11 @@ This setup allows you to isolate and capture audio from specific applications wh
    sample_rate = 48000
    channels = 2
    frames_per_buffer = 2048
+   base_buffer = 0.25
+   drift_kp = 0.02
+   drift_max_rate = 0.001
+   drift_log_interval = 15
+   drift_persist = 2
    device_1_volume = 1.0
    device_1_latency = 0.08
    device_2_volume = 1.0
@@ -90,10 +95,14 @@ This setup allows you to isolate and capture audio from specific applications wh
    - List available devices: `python audio_split.py --list-devices`
    - Reset configuration: `python audio_split.py --reset-config`
    - Show version: `python audio_split.py --version`
+   - Use classic auto-refresh UI: `python audio_split.py --ui classic`
+   - In REPL UI mode: `list outputs` → `add output <i|text>` / `remove output <N|text>` / `set output <N> <i>` to manage outputs without editing `settings.cfg`
 
 4. **Controls**
    - `Ctrl+C`: Stop the application
    - Edit `settings.cfg` to adjust volumes and latency (changes apply immediately)
+   - In REPL UI mode, type `help` to see interactive commands
+   - To re-run the interactive setup wizard from the REPL: `wizard`
 
 ## Troubleshooting
 
@@ -121,7 +130,19 @@ This setup allows you to isolate and capture audio from specific applications wh
    - Avoid selecting `CABLE Input (VB-Audio Virtual Cable)` as an output device inside Audio Splitter unless you explicitly know you need it
    - If you hear echo after changing Windows audio routing, restart the script to reset internal buffers
 
-6. **Volume Too Low / Need 100% On Other Devices**
+6. **Devices Drift Out Of Sync Over Time**
+   - Different output devices have independent hardware clocks, so perfect long-term sync requires drift compensation
+   - This project applies lightweight drift compensation by slightly time-stretching each output (shown as `rate …ppm` in the REPL UI)
+   - If you see frequent drift warnings, increase `base_buffer` slightly (e.g. `0.35`) or keep the device sample rates consistent in Windows
+
+## Latency Auto-Detection (Optional)
+
+Automatically finding the “best latency” between two output devices is only possible if you can **measure both signals**.
+
+- **Recommended approach**: place a microphone where it can hear both devices, then play a short calibration sound and use cross-correlation to estimate the offset.
+- Without a microphone/loopback capture path, the program cannot know the *acoustic* delay of a wireless headset vs speakers; it can only keep them from drifting once aligned.
+
+7. **Volume Too Low / Need 100% On Other Devices**
    - Audio Splitter does not override Windows per-device volume or Volume Mixer settings; it applies only the per-device `device_N_volume` multiplier from `settings.cfg`
    - Check Windows Sound settings for the relevant device levels (including `CABLE Output` recording level if you route through VB-Cable)
 

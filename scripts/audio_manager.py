@@ -1,7 +1,7 @@
 import pyaudio
 import numpy as np
 import configparser
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 import time
 import os
 import threading
@@ -12,6 +12,8 @@ from .utils import (
 )
 import platform
 import logging
+from .version import __version__
+from dataclasses import dataclass
 
 class AudioDevice:
     def __init__(self, name: str, device_index: int):
@@ -31,8 +33,22 @@ class AudioDevice:
         self.drift_tolerance = 0.02  # 20ms drift tolerance
         self.reset_count = 0
         self.max_resets = 3
+        self.clock_initial_offset_seconds: Optional[float] = None
+        self.clock_last_offset_seconds: Optional[float] = None
+        self.clock_drift_seconds: Optional[float] = None
+        self.last_drift_warning_time = 0.0
+        self._drift_over_tolerance_since: Optional[float] = None
 
-    def open_output_stream(self, pa: "pyaudio.PyAudio", *, audio_format: int, channels: int, rate: int, frames_per_buffer: int):
+    def open_output_stream(
+        self,
+        pa: "pyaudio.PyAudio",
+        *,
+        audio_format: int,
+        channels: int,
+        rate: int,
+        frames_per_buffer: int,
+        callback=None,
+    ):
         self.sample_rate = rate
         self.channels = channels
         self.buffer = np.zeros((self.sample_rate * 4, self.channels), dtype=np.float32)
@@ -48,6 +64,7 @@ class AudioDevice:
             input=False,
             output_device_index=self.device_index,
             frames_per_buffer=frames_per_buffer,
+            stream_callback=callback,
         )
         
     def close_stream(self):
@@ -118,45 +135,18 @@ class AudioDevice:
         if reference_device is None:
             return True
 
-        # Only check periodically
-        if current_time - self.last_sync_check < self.sync_check_interval:
-            return True
-
-        self.last_sync_check = current_time
-
-        # Calculate current offset from reference
-        current_offset = (self.buffer_position - reference_device.buffer_position) / float(self.sample_rate)
-
-        # On first check, store the initial offset
-        if self.initial_offset is None:
-            self.initial_offset = current_offset
-            return True
-
-        # Check for drift from initial offset
-        drift = abs(current_offset - self.initial_offset)
-        
-        if drift > self.drift_tolerance:
-            self.reset_count += 1
-            if self.reset_count <= self.max_resets:
-                return False
-        else:
-            self.reset_count = max(0, self.reset_count - 1)
-
+        # Legacy placeholder: drift detection now uses stream clock drift in AudioManager.
         return True
 
     def process_audio(self, audio_data):
-        current_time = time.time()
-        
-        # Check sync status
-        if not self.check_sync(current_time, None):
-            if self.reset_buffer():
-                self.initial_offset = None
-            return np.zeros_like(audio_data)
-        
-        # First apply latency (if any)
-        processed = self.apply_latency(audio_data.copy())
-        # Then apply volume
-        return self.apply_volume(processed)
+        return self.apply_volume(audio_data)
+
+
+@dataclass
+class _PlayoutState:
+    read_pos: float
+    rate_adjust: float = 0.0
+    last_lag_error_seconds: float = 0.0
 
 class AudioManager:
     def __init__(self, config_path='settings.cfg'):
@@ -180,13 +170,28 @@ class AudioManager:
         self.max_sync_warnings = 3
         self.current_log = ""  # Store current log message
         self._input_stream = None
-        self._audio_thread = None
         self._stop_event = threading.Event()
         self._audio_format = pyaudio.paFloat32
         self._channels = 2
         self._sample_rate = 44100
         self._sample_rate_configured = False
         self._frames_per_buffer = 2048
+        self._input_device_index = None
+        self._input_device_name = ""
+        self._virtual_cable_found = False
+        self._last_drift_update = 0.0
+        self._writer_thread = None
+        self._buffer_lock = threading.Lock()
+        self._ring_buffer = None
+        self._ring_size_frames = 0
+        self._write_pos = 0  # absolute frame counter
+        self._base_buffer_seconds = 0.25
+        self._max_rate_adjust = 0.001  # +/-1000 ppm
+        self._kp = 0.02
+        self._drift_log_interval = 15.0
+        self._drift_persist_seconds = 2.0
+        self._device_state: Dict[str, _PlayoutState] = {}
+        self._reference_output_key: Optional[str] = None
         self.load_config()
         self.initialize_devices()
 
@@ -337,6 +342,7 @@ class AudioManager:
                 virtual_cable_found = True
                 logging.info("Virtual Cable found")
                 break
+        self._virtual_cable_found = virtual_cable_found
         
         if not virtual_cable_found:
             logging.warning("Virtual Cable not found")
@@ -449,8 +455,14 @@ class AudioManager:
             raise RuntimeError("No output devices configured")
 
         self._load_stream_settings_from_config()
+        self._load_drift_compensation_settings()
 
         input_device_index = self._find_input_device_index()
+        self._input_device_index = input_device_index
+        try:
+            self._input_device_name = self.pa.get_device_info_by_index(input_device_index).get("name", "")
+        except Exception:
+            self._input_device_name = ""
         if not self._sample_rate_configured:
             try:
                 info = self.pa.get_device_info_by_index(input_device_index)
@@ -478,24 +490,98 @@ class AudioManager:
 
         if last_error is not None:
             raise last_error
+        self._writer_thread = threading.Thread(target=self._writer_loop, name="audio-splitter-writer", daemon=True)
+        self._writer_thread.start()
 
-        self._audio_thread = threading.Thread(target=self._audio_loop, name="audio-splitter-loop", daemon=True)
-        self._audio_thread.start()
-
-    def stop_audio(self):
+    def stop_audio(self, terminate_pa: bool = False):
         logging.info("Stopping audio streams")
         self._stop_event.set()
-        if self._audio_thread and self._audio_thread.is_alive():
+        self._close_streams()
+        if self._writer_thread and self._writer_thread.is_alive():
             try:
-                self._audio_thread.join(timeout=2.0)
+                self._writer_thread.join(timeout=2.0)
             except Exception:
                 pass
-        self._audio_thread = None
-        self._close_streams()
-        try:
-            self.pa.terminate()
-        except Exception:
-            pass
+        self._writer_thread = None
+        if terminate_pa:
+            try:
+                self.pa.terminate()
+            except Exception:
+                pass
+
+    def shutdown(self):
+        self.stop_audio(terminate_pa=True)
+
+    def restart_audio(self):
+        self.stop_audio(terminate_pa=False)
+        self.start_audio()
+
+    def get_configured_output_devices(self) -> List[str]:
+        with self._config_lock:
+            if not self.config.has_section("Devices"):
+                return []
+            device_count = self.config.getint("Settings", "device_count", fallback=0) if self.config.has_section("Settings") else 0
+            out: List[str] = []
+            for i in range(1, max(0, device_count) + 1):
+                key = f"device_{i}"
+                if key in self.config["Devices"]:
+                    out.append(self.config["Devices"][key])
+            return out
+
+    def run_setup_wizard(self):
+        self.stop_audio(terminate_pa=False)
+        with self._config_lock:
+            self.config = configparser.ConfigParser()
+        self._create_default_config()
+        self._reinitialize_devices_from_config()
+
+    def set_output_devices(self, device_names: List[str], persist: bool = True):
+        device_names = [str(n).strip() for n in device_names if str(n).strip()]
+        if not device_names:
+            raise ValueError("No output devices provided")
+
+        with self._config_lock:
+            old_devices = dict(self.config["Devices"]) if self.config.has_section("Devices") else {}
+            old_settings = dict(self.config["Settings"]) if self.config.has_section("Settings") else {}
+
+            if not self.config.has_section("Devices"):
+                self.config.add_section("Devices")
+            else:
+                for k in list(self.config["Devices"].keys()):
+                    self.config.remove_option("Devices", k)
+
+            for i, name in enumerate(device_names, 1):
+                self.config.set("Devices", f"device_{i}", name)
+
+            if not self.config.has_section("Settings"):
+                self.config.add_section("Settings")
+            self.config.set("Settings", "device_count", str(len(device_names)))
+
+            # Preserve volumes/latency by matching old configured names where possible.
+            name_to_settings = {}
+            for k, v in old_devices.items():
+                if not k.startswith("device_"):
+                    continue
+                try:
+                    idx = int(k.split("_", 1)[1])
+                except Exception:
+                    continue
+                vol = old_settings.get(f"device_{idx}_volume", "1.0")
+                lat = old_settings.get(f"device_{idx}_latency", "0.0")
+                name_to_settings[v] = (vol, lat)
+
+            for i, name in enumerate(device_names, 1):
+                vol, lat = name_to_settings.get(name, ("1.0", "0.0"))
+                self.config.set("Settings", f"device_{i}_volume", str(vol))
+                self.config.set("Settings", f"device_{i}_latency", str(lat))
+
+        if persist:
+            self.save_config()
+        self._reinitialize_devices_from_config()
+
+    def _reinitialize_devices_from_config(self):
+        self.devices = {}
+        self.initialize_devices()
 
     def _open_streams(self, *, input_device_index: int, audio_format: int):
         self._input_stream = self.pa.open(
@@ -508,14 +594,22 @@ class AudioManager:
             frames_per_buffer=self._frames_per_buffer,
         )
 
-        for device in self.devices.values():
+        self._setup_ring_buffer()
+        self._setup_playout_states()
+
+        for key, device in self.devices.items():
             device.open_output_stream(
                 self.pa,
                 audio_format=audio_format,
                 channels=self._channels,
                 rate=self._sample_rate,
                 frames_per_buffer=self._frames_per_buffer,
+                callback=self._make_output_callback(key),
             )
+            try:
+                device._stream.start_stream()
+            except Exception:
+                pass
 
     def _close_streams(self):
         if self._input_stream is not None:
@@ -531,26 +625,23 @@ class AudioManager:
 
         for device in self.devices.values():
             device.close_stream()
+        with self._buffer_lock:
+            self._ring_buffer = None
+            self._ring_size_frames = 0
+            self._write_pos = 0
+        self._device_state = {}
 
-    def _audio_loop(self):
-        reference_device = None
-        try:
-            reference_device = min(self.devices.values(), key=lambda d: d.latency)
-        except ValueError:
-            reference_device = None
-
+    def _writer_loop(self):
         while not self._stop_event.is_set():
             if self.check_config_updated():
                 self.reload_settings()
-                for device in self.devices.values():
-                    device.reset_buffer()
                 self.update_log("Settings updated")
 
             try:
                 in_data = self._input_stream.read(self._frames_per_buffer, exception_on_overflow=False)
             except Exception as e:
                 self.update_log(f"Input read error: {e}")
-                time.sleep(0.05)
+                time.sleep(0.02)
                 continue
 
             try:
@@ -559,20 +650,240 @@ class AudioManager:
                 self.update_log(f"Decode error: {e}")
                 continue
 
-            current_time = time.time()
-            for device in self.devices.values():
-                if reference_device is not None and device is not reference_device:
-                    if not device.check_sync(current_time, reference_device):
-                        if device.reset_buffer():
-                            self.update_log(f"Resetting {device.name} - drift detected")
-                            continue
-                try:
-                    processed = device.process_audio(audio_data)
-                    out_bytes = self._encode_audio(processed)
-                    if device._stream is not None:
-                        device._stream.write(out_bytes)
-                except Exception as e:
-                    self.update_log(f"Output error for {device.name}: {e}")
+            with self._buffer_lock:
+                if self._ring_buffer is None:
+                    continue
+                self._ring_write(audio_data)
+
+    def _update_clock_drift(self, reference_device: AudioDevice, now: float):
+        if now - self._last_drift_update < 0.25:
+            return
+        self._last_drift_update = now
+
+        ref_stream = getattr(reference_device, "_stream", None)
+        if ref_stream is None:
+            return
+        get_time = getattr(ref_stream, "get_time", None)
+        if not callable(get_time):
+            return
+
+        try:
+            ref_time = float(ref_stream.get_time())
+        except Exception:
+            return
+
+        for device in self.devices.values():
+            if device is reference_device:
+                device.clock_last_offset_seconds = 0.0
+                if device.clock_initial_offset_seconds is None:
+                    device.clock_initial_offset_seconds = 0.0
+                device.clock_drift_seconds = 0.0
+                continue
+
+            stream = getattr(device, "_stream", None)
+            if stream is None:
+                continue
+            if not callable(getattr(stream, "get_time", None)):
+                continue
+            try:
+                dev_time = float(stream.get_time())
+            except Exception:
+                continue
+
+            offset = dev_time - ref_time
+            device.clock_last_offset_seconds = offset
+            if device.clock_initial_offset_seconds is None:
+                device.clock_initial_offset_seconds = offset
+            device.clock_drift_seconds = offset - float(device.clock_initial_offset_seconds)
+
+            if device.clock_drift_seconds is not None and abs(device.clock_drift_seconds) > device.drift_tolerance:
+                if now - device.last_drift_warning_time > 5.0:
+                    device.last_drift_warning_time = now
+                    self.update_log(f"Drift: {device.name} {device.clock_drift_seconds*1000.0:+.1f}ms")
+
+    def _load_drift_compensation_settings(self):
+        settings = self.config["Settings"] if self.config.has_section("Settings") else {}
+        try:
+            self._base_buffer_seconds = float(settings.get("base_buffer", self._base_buffer_seconds))
+        except Exception:
+            self._base_buffer_seconds = 0.25
+        self._base_buffer_seconds = max(0.05, min(2.0, self._base_buffer_seconds))
+
+        try:
+            self._kp = float(settings.get("drift_kp", self._kp))
+        except Exception:
+            self._kp = 0.02
+        self._kp = max(0.0, min(0.2, self._kp))
+
+        try:
+            self._max_rate_adjust = float(settings.get("drift_max_rate", self._max_rate_adjust))
+        except Exception:
+            self._max_rate_adjust = 0.001
+        self._max_rate_adjust = max(0.0, min(0.01, self._max_rate_adjust))
+
+        try:
+            self._drift_log_interval = float(settings.get("drift_log_interval", self._drift_log_interval))
+        except Exception:
+            self._drift_log_interval = 15.0
+        self._drift_log_interval = max(1.0, min(120.0, self._drift_log_interval))
+
+        try:
+            self._drift_persist_seconds = float(settings.get("drift_persist", self._drift_persist_seconds))
+        except Exception:
+            self._drift_persist_seconds = 2.0
+        self._drift_persist_seconds = max(0.0, min(30.0, self._drift_persist_seconds))
+
+    def _setup_ring_buffer(self):
+        max_device_latency = 0.0
+        for device in self.devices.values():
+            max_device_latency = max(max_device_latency, float(device.latency))
+        seconds = max(2.0, self._base_buffer_seconds + max_device_latency + 1.0)
+        self._ring_size_frames = int(self._sample_rate * seconds)
+        self._ring_buffer = np.zeros((self._ring_size_frames, self._channels), dtype=np.float32)
+        self._write_pos = 0
+
+    def _setup_playout_states(self):
+        try:
+            self._reference_output_key = min(self.devices.keys(), key=lambda k: self.devices[k].latency)
+        except Exception:
+            self._reference_output_key = next(iter(self.devices.keys()), None)
+
+        base_delay_frames = int(self._base_buffer_seconds * self._sample_rate)
+        self._device_state = {}
+        for key, device in self.devices.items():
+            target_delay = base_delay_frames + int(float(device.latency) * self._sample_rate)
+            # Allow negative read positions so the initial target delay is met immediately via silent pre-roll.
+            start_pos = float(self._write_pos - target_delay)
+            self._device_state[key] = _PlayoutState(read_pos=start_pos)
+            device.clock_initial_offset_seconds = None
+            device.clock_last_offset_seconds = None
+            device.clock_drift_seconds = None
+            device._drift_over_tolerance_since = None
+
+    def _ring_write(self, frames: np.ndarray):
+        n = int(frames.shape[0])
+        if n <= 0:
+            return
+        if self._ring_size_frames <= 0:
+            return
+
+        # If a write is larger than the ring, keep only the most recent window.
+        # Advance write_pos so absolute indexing stays consistent.
+        if n > self._ring_size_frames:
+            drop = n - self._ring_size_frames
+            self._write_pos += drop
+            frames = frames[-self._ring_size_frames :, :]
+            n = self._ring_size_frames
+
+        start = int(self._write_pos % self._ring_size_frames)
+        end = start + n
+        if end <= self._ring_size_frames:
+            self._ring_buffer[start:end, :] = frames
+        else:
+            first = self._ring_size_frames - start
+            self._ring_buffer[start:, :] = frames[:first, :]
+            self._ring_buffer[: end - self._ring_size_frames, :] = frames[first:, :]
+        self._write_pos += n
+
+    def _ring_read_linear(self, positions: np.ndarray) -> np.ndarray:
+        out = np.zeros((int(positions.shape[0]), self._channels), dtype=np.float32)
+        if self._ring_buffer is None or self._ring_size_frames <= 0:
+            return out
+
+        # Positions are absolute frame indices. For indices <0 or beyond what we've written,
+        # return silence rather than wrapping around.
+        max_pos = float(self._write_pos - 2)
+        valid = (positions >= 0.0) & (positions <= max_pos)
+        if not np.any(valid):
+            return out
+
+        pos_v = positions[valid]
+        idx0 = np.floor(pos_v).astype(np.int64)
+        frac = (pos_v - idx0.astype(np.float64)).astype(np.float32)
+        idx1 = idx0 + 1
+
+        i0 = (idx0 % self._ring_size_frames).astype(np.int64)
+        i1 = (idx1 % self._ring_size_frames).astype(np.int64)
+
+        a = self._ring_buffer[i0, :]
+        b = self._ring_buffer[i1, :]
+        frac2 = frac.reshape((-1, 1))
+        out_v = (a * (1.0 - frac2)) + (b * frac2)
+        out[valid, :] = out_v
+        return out
+
+    def _make_output_callback(self, device_key: str):
+        def callback(in_data, frame_count, time_info, status):
+            with self._buffer_lock:
+                if self._ring_buffer is None or self._ring_size_frames <= 0:
+                    return (np.zeros((frame_count, self._channels), dtype=np.float32).tobytes(), pyaudio.paContinue)
+
+                state = self._device_state.get(device_key)
+                device = self.devices.get(device_key)
+                if state is None or device is None:
+                    return (np.zeros((frame_count, self._channels), dtype=np.float32).tobytes(), pyaudio.paContinue)
+
+                base_delay_frames = int(self._base_buffer_seconds * self._sample_rate)
+                target_delay_frames = base_delay_frames + int(float(device.latency) * self._sample_rate)
+
+                current_lag_frames = float(self._write_pos) - float(state.read_pos)
+                lag_error_frames = current_lag_frames - float(target_delay_frames)
+                lag_error_seconds = lag_error_frames / float(self._sample_rate)
+
+                # Adaptive resampling: nudge read rate to keep lag near target.
+                rate_adjust = self._kp * lag_error_seconds
+                if rate_adjust > self._max_rate_adjust:
+                    rate_adjust = self._max_rate_adjust
+                elif rate_adjust < -self._max_rate_adjust:
+                    rate_adjust = -self._max_rate_adjust
+                state.rate_adjust = rate_adjust
+                state.last_lag_error_seconds = lag_error_seconds
+                step = 1.0 + float(rate_adjust)
+
+                # Underflow/overrun protection: resync read pointer if too close or too far behind.
+                min_needed = float(frame_count + 2)
+                if current_lag_frames < min_needed or current_lag_frames > float(self._ring_size_frames - 4):
+                    state.read_pos = float(self._write_pos - target_delay_frames)
+                    device.clock_last_offset_seconds = current_lag_frames / float(self._sample_rate)
+                    device.clock_drift_seconds = lag_error_seconds
+                    out = np.zeros((frame_count, self._channels), dtype=np.float32)
+                    return (self._encode_audio(out), pyaudio.paContinue)
+
+                positions = state.read_pos + (np.arange(frame_count, dtype=np.float64) * step)
+                out = self._ring_read_linear(positions)
+                state.read_pos = float(state.read_pos + (frame_count * step))
+
+                # Metrics: drift is "how far from target delay" (signed).
+                device.clock_last_offset_seconds = current_lag_frames / float(self._sample_rate)
+                if device.clock_drift_seconds is None:
+                    device.clock_drift_seconds = lag_error_seconds
+                else:
+                    device.clock_drift_seconds = (0.8 * float(device.clock_drift_seconds)) + (0.2 * lag_error_seconds)
+                if device.clock_initial_offset_seconds is None:
+                    device.clock_initial_offset_seconds = device.clock_last_offset_seconds
+
+                # Only log if drift persists, to avoid noisy startup/transients.
+                drift_abs = abs(lag_error_seconds)
+                if drift_abs > float(device.drift_tolerance):
+                    if device._drift_over_tolerance_since is None:
+                        device._drift_over_tolerance_since = time.time()
+                    now = time.time()
+                    if (
+                        now - float(device._drift_over_tolerance_since) >= self._drift_persist_seconds
+                        and now - device.last_drift_warning_time >= self._drift_log_interval
+                    ):
+                        device.last_drift_warning_time = now
+                        self.update_log(
+                            f"Drift: {device.name} {lag_error_seconds*1000.0:+.1f}ms "
+                            f"(rate {rate_adjust*1_000_000.0:+.0f}ppm)"
+                        )
+                else:
+                    device._drift_over_tolerance_since = None
+
+                out = device.apply_volume(out)
+                return (self._encode_audio(out), pyaudio.paContinue)
+
+        return callback
 
     def _decode_audio(self, in_data: bytes) -> np.ndarray:
         if self._audio_format == pyaudio.paFloat32:
@@ -638,6 +949,61 @@ class AudioManager:
                 self._sample_rate_configured = False
         except Exception:
             self._sample_rate_configured = False
+
+    def set_stream_setting(self, key: str, value: str, persist: bool = True):
+        key = str(key).strip()
+        value = str(value).strip()
+        if not key:
+            raise ValueError("Missing key")
+
+        with self._config_lock:
+            if not self.config.has_section("Settings"):
+                self.config.add_section("Settings")
+            self.config.set("Settings", key, value)
+
+        if persist:
+            self.save_config()
+
+        # Keep in-memory settings in sync for restart.
+        if key in ("sample_rate", "channels", "frames_per_buffer"):
+            self._load_stream_settings_from_config()
+
+    def get_runtime_info(self) -> Dict[str, str]:
+        fmt = "float32" if self._audio_format == pyaudio.paFloat32 else "int16" if self._audio_format == pyaudio.paInt16 else str(self._audio_format)
+        return {
+            "version": __version__,
+            "config_path": self.config_path,
+            "virtual_cable": "yes" if self._virtual_cable_found else "no",
+            "input_device_name": self._input_device_name,
+            "sample_rate": str(self._sample_rate),
+            "channels": str(self._channels),
+            "frames_per_buffer": str(self._frames_per_buffer),
+            "format": fmt,
+            "log": self.current_log or "",
+        }
+
+    def get_output_device_rows(self) -> List[Dict[str, str]]:
+        rows: List[Dict[str, str]] = []
+        for key, device in self.devices.items():
+            if device.clock_drift_seconds is None:
+                drift_ms = "-"
+            else:
+                drift_ms = f"{device.clock_drift_seconds * 1000.0:+.0f}"
+            rate_ppm = "-"
+            state = self._device_state.get(key)
+            if state is not None:
+                rate_ppm = f"{state.rate_adjust * 1_000_000.0:+.0f}"
+            rows.append(
+                {
+                    "key": key,
+                    "name": device.name,
+                    "volume": f"{device.volume:.2f}",
+                    "latency_ms": f"{device.latency * 1000.0:.0f}",
+                    "drift_ms": drift_ms,
+                    "rate_ppm": rate_ppm,
+                }
+            )
+        return rows
 
     def update_device_settings(
         self,
@@ -716,6 +1082,28 @@ class AudioManager:
         
         return sorted(devices.keys(), key=sort_key)
 
+    @staticmethod
+    def list_available_input_devices():
+        """List all available audio input devices"""
+        pa = pyaudio.PyAudio()
+        devices = {}
+
+        for i in range(pa.get_device_count()):
+            device_info = pa.get_device_info_by_index(i)
+            if device_info.get("maxInputChannels", 0) > 0:
+                name = device_info.get("name", "")
+                if any(skip in name for skip in ["Microsoft Sound Mapper", "Primary Sound Driver"]):
+                    continue
+                devices[name] = i
+
+        pa.terminate()
+
+        def sort_key(name):
+            base = name.split("(")[0].strip()
+            return (base, name)
+
+        return sorted(devices.keys(), key=sort_key)
+
     def get_status_string(self):
         """Get current status string for display"""
         status_lines = []
@@ -741,6 +1129,11 @@ class AudioManager:
                 f"  {Colors.CYAN}{device_name}{Colors.RESET}:"
                 f"\n    Volume: {Colors.GREEN}{device.volume:.2f}{Colors.RESET}"
                 f"\n    Latency: {Colors.YELLOW}{device.latency*1000:.0f}ms{Colors.RESET}"
+                + (
+                    f"\n    Drift: {Colors.RED}{device.clock_drift_seconds*1000:+.0f}ms{Colors.RESET}"
+                    if device.clock_drift_seconds is not None
+                    else ""
+                )
             )
         
         # Add current log message if any
