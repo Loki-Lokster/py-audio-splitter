@@ -136,6 +136,7 @@ class CliRepl:
                 "  set latency <N> <seconds>  Set device_N latency",
                 "  set input <substring>      Set input device (restarts)",
                 "  set sample_rate <hz>       Set sample rate (restarts)",
+                "  set format <auto|float32|int16>  Set stream format (restarts)",
                 "  set channels <n>           Set channels (restarts)",
                 "  set buffer <frames>        Set frames_per_buffer (restarts)",
                 "  reload                    Reload volumes/latency from settings.cfg",
@@ -306,7 +307,7 @@ class CliRepl:
             self.manager.update_device_settings(device_name, latency=value, persist=True)
             return CommandResult(message=f"Updated {device_name} latency to {value:g}s")
 
-        if key in ("input", "sample_rate", "channels", "buffer", "frames_per_buffer"):
+        if key in ("input", "sample_rate", "format", "channels", "buffer", "frames_per_buffer"):
             if not rest:
                 return CommandResult(message=f"Usage: set {key} <value>")
             value_str = " ".join(rest).strip()

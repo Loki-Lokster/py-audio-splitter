@@ -172,6 +172,7 @@ class AudioManager:
         self._input_stream = None
         self._stop_event = threading.Event()
         self._audio_format = pyaudio.paFloat32
+        self._format_preference = "auto"  # auto|float32|int16
         self._channels = 2
         self._sample_rate = 44100
         self._sample_rate_configured = False
@@ -293,6 +294,20 @@ class AudioManager:
             # Add default latency settings
             for i in range(device_count):
                 self.config['Settings'][f'device_{i+1}_latency'] = '0.0'
+
+            # Stream settings (optional; safe defaults)
+            self.config['Settings'].setdefault('input_device', 'auto')
+            self.config['Settings'].setdefault('sample_rate', 'auto')
+            self.config['Settings'].setdefault('format', 'auto')
+            self.config['Settings'].setdefault('channels', '2')
+            self.config['Settings'].setdefault('frames_per_buffer', '2048')
+
+            # Drift compensation defaults
+            self.config['Settings'].setdefault('base_buffer', '0.25')
+            self.config['Settings'].setdefault('drift_kp', '0.02')
+            self.config['Settings'].setdefault('drift_max_rate', '0.001')
+            self.config['Settings'].setdefault('drift_log_interval', '15')
+            self.config['Settings'].setdefault('drift_persist', '2')
             
             self.save_config()
             print_status("\nConfiguration saved! You can edit volumes and latency in settings.cfg", "success")
@@ -478,7 +493,14 @@ class AudioManager:
 
         # Best-effort: try float32 first, then int16 if the backend doesn't support float32.
         last_error = None
-        for fmt in (pyaudio.paFloat32, pyaudio.paInt16):
+        if self._format_preference == "int16":
+            format_order = (pyaudio.paInt16,)
+        elif self._format_preference == "float32":
+            format_order = (pyaudio.paFloat32,)
+        else:
+            format_order = (pyaudio.paFloat32, pyaudio.paInt16)
+
+        for fmt in format_order:
             try:
                 self._open_streams(input_device_index=input_device_index, audio_format=fmt)
                 self._audio_format = fmt
@@ -909,6 +931,8 @@ class AudioManager:
         configured = None
         if self.config.has_section("Settings"):
             configured = self.config.get("Settings", "input_device", fallback="").strip()
+            if configured.lower() in ("", "auto", "default"):
+                configured = None
 
         for i in range(self.pa.get_device_count()):
             device_info = self.pa.get_device_info_by_index(i)
@@ -942,13 +966,23 @@ class AudioManager:
 
         try:
             cfg_rate = settings.get("sample_rate", "").strip()
-            if cfg_rate:
+            if cfg_rate and cfg_rate.lower() not in ("auto", "default"):
                 self._sample_rate = int(float(cfg_rate))
                 self._sample_rate_configured = True
             else:
                 self._sample_rate_configured = False
         except Exception:
             self._sample_rate_configured = False
+
+        fmt = str(settings.get("format", "auto")).strip().lower()
+        if fmt in ("auto", "default", ""):
+            self._format_preference = "auto"
+        elif fmt in ("float32", "f32"):
+            self._format_preference = "float32"
+        elif fmt in ("int16", "i16"):
+            self._format_preference = "int16"
+        else:
+            self._format_preference = "auto"
 
     def set_stream_setting(self, key: str, value: str, persist: bool = True):
         key = str(key).strip()

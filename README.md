@@ -92,14 +92,17 @@ This setup allows you to isolate and capture audio from specific applications wh
      - `device_N_volume`: Range `0.0` to `1.0` (0% to 100%)
      - `device_N_latency`: Delay in seconds (e.g., `0.08` = 80ms)
    - Stream settings (restart required):
-     - `input_device`: Substring match for the input/capture device (defaults to `CABLE Output` if present)
-     - `sample_rate`, `channels`, `frames_per_buffer`
+     - `input_device`: Substring match for the input/capture device (`auto` prefers `CABLE Output` if present)
+     - `sample_rate`: Hz or `auto` (uses input device default sample rate)
+     - `format`: `auto`, `float32`, or `int16`
+     - `channels`, `frames_per_buffer`
    - Drift compensation (restart required):
      - `base_buffer`: Base buffer in seconds (higher = more stable, more latency)
      - `drift_kp`: Controller strength
      - `drift_max_rate`: Max time-stretch rate (e.g., `0.001` = 1000 ppm)
      - `drift_log_interval`: Min seconds between drift log messages
      - `drift_persist`: Seconds drift must persist before logging
+   - If these keys are missing in your `settings.cfg`, add them under `[Settings]` (new configs created by the wizard include them)
 
 3. **Commands**
    - List available devices: `python audio_split.py --list-devices`
