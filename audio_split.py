@@ -1,5 +1,5 @@
 import argparse
-from scripts.utils import print_header, print_status, Colors, clear_screen
+from scripts.utils import print_header, print_status, Colors, clear_screen, ensure_utf8_console
 from scripts.audio_manager import AudioManager
 from scripts.version import __version__
 from scripts.logging import setup_logging
@@ -15,6 +15,8 @@ def signal_handler(sig, frame):
 def main():
     # Setup logging first
     log_file = setup_logging()
+    manager = None
+    ensure_utf8_console()
     
     parser = argparse.ArgumentParser(description='Audio Splitter - Route audio to multiple output devices')
     parser.add_argument('--version', action='version', 
@@ -84,7 +86,8 @@ def main():
         print_status(f"\nError: {str(e)}", "error")
         print_status(f"\nCheck the log file for details: {log_file}", "info")
     finally:
-        manager.stop_audio()
+        if manager is not None:
+            manager.stop_audio()
 
 if __name__ == "__main__":
-    main() 
+    main()

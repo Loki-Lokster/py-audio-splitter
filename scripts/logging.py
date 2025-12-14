@@ -2,7 +2,7 @@ import os
 import sys
 import logging
 from datetime import datetime
-from .utils import print_status
+from .utils import print_status, Colors
 
 def setup_logging():
     """Setup logging configuration with log rotation"""
@@ -20,10 +20,9 @@ def setup_logging():
         ], reverse=True)
         
         # Remove excess log files
-        for old_log in log_files[MAX_LOGS-1:]:
+        for old_log in log_files[MAX_LOGS:]:
             try:
                 os.remove(os.path.join(log_dir, old_log))
-                logging.info(f"Removed old log file: {old_log}")
             except OSError:
                 pass
     except Exception as e:
@@ -32,14 +31,41 @@ def setup_logging():
     # Create new log file
     log_file = os.path.join(log_dir, f'audio_splitter_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
     
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s [%(levelname)s] %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler(sys.stdout)
-        ]
-    )
+    class ColoredFormatter(logging.Formatter):
+        def format(self, record):
+            # Add colors to log levels
+            if record.levelno == logging.WARNING:
+                record.msg = f"{Colors.RED}{record.msg}{Colors.RESET}"
+            elif record.levelno == logging.ERROR:
+                record.msg = f"{Colors.RED}{record.msg}{Colors.RESET}"
+            elif record.levelno == logging.INFO:
+                # Don't color info messages to keep them clean
+                record.msg = f"{record.msg}"
+            
+            return super().format(record)
+    
+    # Create formatters
+    file_formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+    console_formatter = ColoredFormatter('%(message)s')  # Simpler format for console
+    
+    # Setup file handler
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler.setFormatter(file_formatter)
+    
+    # Setup console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(console_formatter)
+    
+    # Setup root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    
+    # Remove any existing handlers
+    root_logger.handlers = []
+    
+    # Add our handlers
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
     
     # Log system info at startup
     logging.info("=== Audio Splitter Started ===")

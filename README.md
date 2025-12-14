@@ -108,6 +108,14 @@ This setup allows you to isolate and capture audio from specific applications wh
    - Ensure all required Python packages are installed
    - Verify your audio devices are properly connected and recognized by Windows
 
+4. **Non-English Device Names / Garbled Text**
+   - This project reads/writes `settings.cfg` as UTF-8; ensure you edit the file as UTF-8 as well
+   - If the Windows console cannot display device names correctly, run from a terminal configured for UTF-8 (or use the created desktop shortcut)
+
+5. **Echo / Feedback**
+   - Avoid selecting `CABLE Input (VB-Audio Virtual Cable)` as an output device inside Audio Splitter unless you explicitly know you need it
+   - If you hear echo after changing Windows audio routing, restart the script to reset internal buffers
+
 ## Contributing
 
 Feel free to open issues or submit pull requests on GitHub.

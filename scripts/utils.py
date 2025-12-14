@@ -67,8 +67,12 @@ def create_windows_shortcut(script_path):
         bat_path = os.path.join(desktop, "Audio Splitter.bat")
         
         # Create batch file
-        with open(bat_path, 'w') as f:
+        with open(bat_path, 'w', encoding='utf-8', newline='\n') as f:
             f.write('@echo off\n')
+            # Best-effort UTF-8 console output for non-English device names/logs
+            f.write('chcp 65001 >NUL\n')
+            f.write('set PYTHONUTF8=1\n')
+            f.write('set PYTHONIOENCODING=utf-8\n')
             f.write(f'"{sys.executable}" "{script_path}"\n')
             f.write('pause')
         
@@ -107,4 +111,24 @@ def setup_console_window(setup_mode=False):
             os.system('title Audio Splitter')
         except:
             pass  # Fail silently if window manipulation fails 
+
+def ensure_utf8_console():
+    """Best-effort UTF-8 console I/O on Windows for non-English device names."""
+    if os.name != 'nt':
+        return
+    try:
+        os.system('chcp 65001 >NUL')
+    except Exception:
+        pass
+
+    for stream_name in ('stdin', 'stdout', 'stderr'):
+        stream = getattr(sys, stream_name, None)
+        if stream is None:
+            continue
+        reconfigure = getattr(stream, 'reconfigure', None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding='utf-8', errors='replace')
+            except Exception:
+                pass
 
