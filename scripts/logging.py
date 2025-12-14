@@ -4,9 +4,10 @@ import logging
 from datetime import datetime
 from .utils import print_status, Colors
 
-def setup_logging():
+def setup_logging(log_dir=None):
     """Setup logging configuration with log rotation"""
-    log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logs')
+    if log_dir is None:
+        log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logs')
     os.makedirs(log_dir, exist_ok=True)
     
     # Keep only the last 5 log files
@@ -19,8 +20,9 @@ def setup_logging():
             if f.startswith('audio_splitter_') and f.endswith('.log')
         ], reverse=True)
         
-        # Remove excess log files
-        for old_log in log_files[MAX_LOGS:]:
+        # Remove excess log files (leave room for the new log file)
+        max_old_logs = max(0, MAX_LOGS - 1)
+        for old_log in log_files[max_old_logs:]:
             try:
                 os.remove(os.path.join(log_dir, old_log))
             except OSError:

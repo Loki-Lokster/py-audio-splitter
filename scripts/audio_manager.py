@@ -4,6 +4,7 @@ import configparser
 from typing import Dict, Optional
 import time
 import os
+import threading
 from .utils import (
     print_status, get_user_choice, Colors, 
     print_virtual_cable_info, create_windows_shortcut, 
@@ -19,8 +20,9 @@ class AudioDevice:
         self.volume = 1.0
         self.latency = 0.0
         self._stream = None
-        self._pa = pyaudio.PyAudio()
-        self.buffer = np.zeros((176400, 2), dtype=np.float32)  # 4 seconds buffer
+        self.sample_rate = 44100
+        self.channels = 2
+        self.buffer = np.zeros((self.sample_rate * 4, self.channels), dtype=np.float32)  # 4 seconds buffer
         self.buffer_position = 0
         self.is_buffer_full = False
         self.initial_offset = None  # Store initial offset from reference
@@ -30,25 +32,32 @@ class AudioDevice:
         self.reset_count = 0
         self.max_resets = 3
 
-    def open_stream(self, callback):
-        self._stream = self._pa.open(
-            format=pyaudio.paFloat32,
-            channels=2,
-            rate=44100,
+    def open_output_stream(self, pa: "pyaudio.PyAudio", *, audio_format: int, channels: int, rate: int, frames_per_buffer: int):
+        self.sample_rate = rate
+        self.channels = channels
+        self.buffer = np.zeros((self.sample_rate * 4, self.channels), dtype=np.float32)
+        self.buffer_position = 0
+        self.is_buffer_full = False
+        self.initial_offset = None
+
+        self._stream = pa.open(
+            format=audio_format,
+            channels=channels,
+            rate=rate,
             output=True,
-            input=True,
-            input_device_index=self._find_input_device(),
+            input=False,
             output_device_index=self.device_index,
-            frames_per_buffer=2048,  # Keep larger buffer size
-            stream_callback=callback
+            frames_per_buffer=frames_per_buffer,
         )
-        self._stream.start_stream()
         
     def close_stream(self):
         if self._stream:
-            self._stream.stop_stream()
+            try:
+                self._stream.stop_stream()
+            except Exception:
+                pass
             self._stream.close()
-            self._pa.terminate()
+            self._stream = None
 
     def apply_volume(self, audio_data):
         return audio_data * self.volume
@@ -57,7 +66,7 @@ class AudioDevice:
         if self.latency <= 0:
             return audio_data
 
-        delay_samples = int(self.latency * 44100)
+        delay_samples = int(self.latency * self.sample_rate)
         data_len = len(audio_data)
         
         # Write new data to buffer
@@ -98,7 +107,7 @@ class AudioDevice:
         if self.reset_count > self.max_resets:
             return False
 
-        self.buffer = np.zeros((176400, 2), dtype=np.float32)
+        self.buffer = np.zeros((self.sample_rate * 4, self.channels), dtype=np.float32)
         self.buffer_position = 0
         self.is_buffer_full = False
         self.initial_offset = None  # Clear initial offset to re-establish
@@ -116,7 +125,7 @@ class AudioDevice:
         self.last_sync_check = current_time
 
         # Calculate current offset from reference
-        current_offset = (self.buffer_position - reference_device.buffer_position) / 44100
+        current_offset = (self.buffer_position - reference_device.buffer_position) / float(self.sample_rate)
 
         # On first check, store the initial offset
         if self.initial_offset is None:
@@ -149,15 +158,6 @@ class AudioDevice:
         # Then apply volume
         return self.apply_volume(processed)
 
-    def _find_input_device(self):
-        # Try to find CABLE Output as input device
-        for i in range(self._pa.get_device_count()):
-            device_info = self._pa.get_device_info_by_index(i)
-            if device_info['maxInputChannels'] > 0 and 'cable output' in device_info['name'].lower():
-                return i
-        # Fallback to default input device
-        return self._pa.get_default_input_device_info()['index']
-
 class AudioManager:
     def __init__(self, config_path='settings.cfg'):
         # Get the directory where the script is located
@@ -166,6 +166,7 @@ class AudioManager:
         self.config_path = os.path.join(self.script_dir, config_path)
         
         self.config = configparser.ConfigParser()
+        self._config_lock = threading.RLock()
         self.devices: Dict[str, AudioDevice] = {}
         self.pa = pyaudio.PyAudio()
         self.last_config_check = 0
@@ -178,13 +179,22 @@ class AudioManager:
         self.sync_warning_count = 0
         self.max_sync_warnings = 3
         self.current_log = ""  # Store current log message
+        self._input_stream = None
+        self._audio_thread = None
+        self._stop_event = threading.Event()
+        self._audio_format = pyaudio.paFloat32
+        self._channels = 2
+        self._sample_rate = 44100
+        self._sample_rate_configured = False
+        self._frames_per_buffer = 2048
         self.load_config()
         self.initialize_devices()
 
     def load_config(self):
-        self.config.read(self.config_path, encoding='utf-8')
-        if not self.config.has_section('Devices'):
-            self._create_default_config()
+        with self._config_lock:
+            self.config.read(self.config_path, encoding='utf-8')
+            if not self.config.has_section('Devices'):
+                self._create_default_config()
 
     def _create_default_config(self):
         print_status("\nNo config found. Let's set up your audio devices.\n", "warning")
@@ -311,10 +321,12 @@ class AudioManager:
             self.save_config()
 
     def initialize_devices(self):
-        if not self.config['Devices']:
-            return
+        with self._config_lock:
+            if not self.config.has_section('Devices') or not self.config['Devices']:
+                return
         
-        device_count = self.config.getint('Settings', 'device_count', fallback=2)
+        with self._config_lock:
+            device_count = self.config.getint('Settings', 'device_count', fallback=2)
         logging.info(f"Initializing {device_count} devices")
         
         # Check for virtual cable
@@ -333,8 +345,10 @@ class AudioManager:
         # Find and initialize all configured audio devices
         for i in range(1, device_count + 1):
             device_name = f'device_{i}'
-            if device_name in self.config['Devices']:
-                device_friendly_name = self.config['Devices'][device_name]
+            with self._config_lock:
+                in_config = self.config.has_section('Devices') and device_name in self.config['Devices']
+                device_friendly_name = self.config['Devices'][device_name] if in_config else None
+            if device_friendly_name:
                 if 'cable input' in device_friendly_name.lower():
                     logging.warning(
                         f"Configured output device '{device_friendly_name}' looks like Virtual Cable playback; "
@@ -350,7 +364,7 @@ class AudioManager:
                     if self.config.has_section('Settings'):
                         volume = self.config.getfloat('Settings', f'{device_name}_volume', fallback=1.0)
                         latency = self.config.getfloat('Settings', f'{device_name}_latency', fallback=0.0)
-                        self.update_device_settings(device_name, volume, latency)
+                        self.update_device_settings(device_name, volume, latency, persist=False)
                         logging.info(f"Applied settings for {device_name}: volume={volume}, latency={latency}")
                 else:
                     logging.error(f"Device not found: {device_friendly_name}")
@@ -398,19 +412,21 @@ class AudioManager:
     def reload_settings(self):
         """Reload settings from config file"""
         old_config = self.config
-        self.config = configparser.ConfigParser()
-        self.config.read(self.config_path, encoding='utf-8')
+        new_config = configparser.ConfigParser()
+        new_config.read(self.config_path, encoding='utf-8')
         
-        if self.config.sections():
+        if new_config.sections():
+            with self._config_lock:
+                self.config = new_config
             for device_name in self.devices:
-                if self.config.has_section('Settings'):
+                if new_config.has_section('Settings'):
                     try:
-                        volume = self.config.getfloat('Settings', f'{device_name}_volume')
-                        latency = self.config.getfloat('Settings', f'{device_name}_latency')
+                        volume = new_config.getfloat('Settings', f'{device_name}_volume')
+                        latency = new_config.getfloat('Settings', f'{device_name}_latency')
                         
                         if (volume != self.devices[device_name].volume or 
                             latency != self.devices[device_name].latency):
-                            self.update_device_settings(device_name, volume, latency)
+                            self.update_device_settings(device_name, volume, latency, persist=False)
                             logging.info(f"Updated settings for {device_name}: volume={volume}, latency={latency}")
                     except:
                         pass
@@ -420,59 +436,216 @@ class AudioManager:
             except OSError:
                 pass
         else:
-            self.config = old_config
+            new_config = old_config
+            with self._config_lock:
+                self.config = new_config
 
     def should_process_audio(self):
         """Always process audio now that filtering is removed"""
         return True
 
     def start_audio(self):
-        logging.info("Starting audio streams")
-        def create_device_callback(device):
-            def callback(in_data, frame_count, time_info, status):
-                # Check for config updates
-                if self.check_config_updated():
-                    self.reload_settings()
-                    device.reset_buffer()  # Reset buffer on config change
-                    self.update_log(f"Settings updated for {device.name}")
-                
-                current_time = time.time()
-                
-                # Get reference device (one with lowest latency)
-                reference_device = min(self.devices.values(), key=lambda d: d.latency)
-                
-                # Check sync status
-                if device != reference_device:
-                    if not device.check_sync(current_time, reference_device):
-                        if device.reset_buffer():
-                            self.update_log(f"Resetting {device.name} - drift detected")
-                            return (np.zeros(frame_count * 2, dtype=np.float32).tobytes(), pyaudio.paContinue)
-                
-                # Process audio
-                if in_data:
-                    try:
-                        audio_data = np.frombuffer(in_data, dtype=np.float32)
-                        audio_data = audio_data.reshape((frame_count, 2))
-                        processed_data = device.process_audio(audio_data)
-                        return (processed_data.tobytes(), pyaudio.paContinue)
-                    except Exception as e:
-                        self.update_log(f"Error processing audio for {device.name}: {str(e)}")
-                        return (np.zeros(frame_count * 2, dtype=np.float32).tobytes(), pyaudio.paContinue)
-                
-                return (np.zeros(frame_count * 2, dtype=np.float32).tobytes(), pyaudio.paContinue)
-            return callback
+        if not self.devices:
+            raise RuntimeError("No output devices configured")
 
-        # Open streams with device-specific callbacks
-        for device in self.devices.values():
-            device.open_stream(create_device_callback(device))
+        self._load_stream_settings_from_config()
+
+        input_device_index = self._find_input_device_index()
+        if not self._sample_rate_configured:
+            try:
+                info = self.pa.get_device_info_by_index(input_device_index)
+                self._sample_rate = int(round(float(info.get("defaultSampleRate", self._sample_rate))))
+            except Exception:
+                pass
+        logging.info(
+            f"Starting audio streams: input_device_index={input_device_index}, "
+            f"rate={self._sample_rate}, channels={self._channels}, frames_per_buffer={self._frames_per_buffer}"
+        )
+
+        self._stop_event.clear()
+
+        # Best-effort: try float32 first, then int16 if the backend doesn't support float32.
+        last_error = None
+        for fmt in (pyaudio.paFloat32, pyaudio.paInt16):
+            try:
+                self._open_streams(input_device_index=input_device_index, audio_format=fmt)
+                self._audio_format = fmt
+                last_error = None
+                break
+            except Exception as e:
+                last_error = e
+                self._close_streams()
+
+        if last_error is not None:
+            raise last_error
+
+        self._audio_thread = threading.Thread(target=self._audio_loop, name="audio-splitter-loop", daemon=True)
+        self._audio_thread.start()
 
     def stop_audio(self):
         logging.info("Stopping audio streams")
+        self._stop_event.set()
+        if self._audio_thread and self._audio_thread.is_alive():
+            try:
+                self._audio_thread.join(timeout=2.0)
+            except Exception:
+                pass
+        self._audio_thread = None
+        self._close_streams()
+        try:
+            self.pa.terminate()
+        except Exception:
+            pass
+
+    def _open_streams(self, *, input_device_index: int, audio_format: int):
+        self._input_stream = self.pa.open(
+            format=audio_format,
+            channels=self._channels,
+            rate=self._sample_rate,
+            input=True,
+            output=False,
+            input_device_index=input_device_index,
+            frames_per_buffer=self._frames_per_buffer,
+        )
+
+        for device in self.devices.values():
+            device.open_output_stream(
+                self.pa,
+                audio_format=audio_format,
+                channels=self._channels,
+                rate=self._sample_rate,
+                frames_per_buffer=self._frames_per_buffer,
+            )
+
+    def _close_streams(self):
+        if self._input_stream is not None:
+            try:
+                self._input_stream.stop_stream()
+            except Exception:
+                pass
+            try:
+                self._input_stream.close()
+            except Exception:
+                pass
+            self._input_stream = None
+
         for device in self.devices.values():
             device.close_stream()
 
-    def update_device_settings(self, device_name: str, volume: Optional[float] = None, 
-                             latency: Optional[float] = None):
+    def _audio_loop(self):
+        reference_device = None
+        try:
+            reference_device = min(self.devices.values(), key=lambda d: d.latency)
+        except ValueError:
+            reference_device = None
+
+        while not self._stop_event.is_set():
+            if self.check_config_updated():
+                self.reload_settings()
+                for device in self.devices.values():
+                    device.reset_buffer()
+                self.update_log("Settings updated")
+
+            try:
+                in_data = self._input_stream.read(self._frames_per_buffer, exception_on_overflow=False)
+            except Exception as e:
+                self.update_log(f"Input read error: {e}")
+                time.sleep(0.05)
+                continue
+
+            try:
+                audio_data = self._decode_audio(in_data)
+            except Exception as e:
+                self.update_log(f"Decode error: {e}")
+                continue
+
+            current_time = time.time()
+            for device in self.devices.values():
+                if reference_device is not None and device is not reference_device:
+                    if not device.check_sync(current_time, reference_device):
+                        if device.reset_buffer():
+                            self.update_log(f"Resetting {device.name} - drift detected")
+                            continue
+                try:
+                    processed = device.process_audio(audio_data)
+                    out_bytes = self._encode_audio(processed)
+                    if device._stream is not None:
+                        device._stream.write(out_bytes)
+                except Exception as e:
+                    self.update_log(f"Output error for {device.name}: {e}")
+
+    def _decode_audio(self, in_data: bytes) -> np.ndarray:
+        if self._audio_format == pyaudio.paFloat32:
+            audio = np.frombuffer(in_data, dtype=np.float32)
+        elif self._audio_format == pyaudio.paInt16:
+            audio_i16 = np.frombuffer(in_data, dtype=np.int16)
+            audio = (audio_i16.astype(np.float32) / 32768.0)
+        else:
+            raise ValueError("Unsupported audio format")
+
+        audio = audio.reshape((self._frames_per_buffer, self._channels))
+        return audio
+
+    def _encode_audio(self, audio: np.ndarray) -> bytes:
+        if self._audio_format == pyaudio.paFloat32:
+            return audio.astype(np.float32, copy=False).tobytes()
+        if self._audio_format == pyaudio.paInt16:
+            clipped = np.clip(audio, -1.0, 1.0)
+            return (clipped * 32767.0).astype(np.int16).tobytes()
+        raise ValueError("Unsupported audio format")
+
+    def _find_input_device_index(self) -> int:
+        configured = None
+        if self.config.has_section("Settings"):
+            configured = self.config.get("Settings", "input_device", fallback="").strip()
+
+        for i in range(self.pa.get_device_count()):
+            device_info = self.pa.get_device_info_by_index(i)
+            if device_info.get("maxInputChannels", 0) <= 0:
+                continue
+            name = device_info.get("name", "")
+            name_l = name.lower()
+            if configured and (configured.lower() in name_l or name_l in configured.lower()):
+                logging.info(f"Using configured input device: {name} (index: {i})")
+                return i
+            if not configured and "cable output" in name_l:
+                logging.info(f"Using VB Cable input device: {name} (index: {i})")
+                return i
+
+        default_index = self.pa.get_default_input_device_info().get("index", 0)
+        logging.info(f"Using default input device index: {default_index}")
+        return int(default_index)
+
+    def _load_stream_settings_from_config(self):
+        settings = self.config["Settings"] if self.config.has_section("Settings") else {}
+
+        try:
+            self._channels = int(settings.get("channels", self._channels))
+        except Exception:
+            self._channels = 2
+
+        try:
+            self._frames_per_buffer = int(settings.get("frames_per_buffer", self._frames_per_buffer))
+        except Exception:
+            self._frames_per_buffer = 2048
+
+        try:
+            cfg_rate = settings.get("sample_rate", "").strip()
+            if cfg_rate:
+                self._sample_rate = int(float(cfg_rate))
+                self._sample_rate_configured = True
+            else:
+                self._sample_rate_configured = False
+        except Exception:
+            self._sample_rate_configured = False
+
+    def update_device_settings(
+        self,
+        device_name: str,
+        volume: Optional[float] = None,
+        latency: Optional[float] = None,
+        persist: bool = True,
+    ):
         if device_name not in self.devices:
             raise ValueError(f"Unknown device: {device_name}")
             
@@ -480,17 +653,27 @@ class AudioManager:
         
         if volume is not None:
             device.volume = max(0.0, min(1.0, volume))
-            self.config.set('Settings', f'{device_name}_volume', str(volume))
+            if persist:
+                with self._config_lock:
+                    if not self.config.has_section('Settings'):
+                        self.config.add_section('Settings')
+                    self.config.set('Settings', f'{device_name}_volume', str(volume))
             
         if latency is not None:
             device.latency = max(0.0, latency)
-            self.config.set('Settings', f'{device_name}_latency', str(latency))
+            if persist:
+                with self._config_lock:
+                    if not self.config.has_section('Settings'):
+                        self.config.add_section('Settings')
+                    self.config.set('Settings', f'{device_name}_latency', str(latency))
             
-        self.save_config()
+        if persist:
+            self.save_config()
 
     def save_config(self):
-        with open(self.config_path, 'w', encoding='utf-8', newline='\n') as configfile:
-            self.config.write(configfile)
+        with self._config_lock:
+            with open(self.config_path, 'w', encoding='utf-8', newline='\n') as configfile:
+                self.config.write(configfile)
 
     @staticmethod
     def list_available_devices():
@@ -546,7 +729,11 @@ class AudioManager:
         # Add device statuses
         status_lines.append(f"{Colors.WHITE}Devices:{Colors.RESET}")
         for name, device in self.devices.items():
-            device_name = self.config['Devices'][name]
+            with self._config_lock:
+                if self.config.has_section('Devices') and name in self.config['Devices']:
+                    device_name = self.config['Devices'][name]
+                else:
+                    device_name = device.name
             if len(device_name) > 30:
                 device_name = device_name[:27] + "..."
             
@@ -571,7 +758,8 @@ class AudioManager:
         """Reset configuration file"""
         if os.path.exists(self.config_path):
             os.remove(self.config_path)
-        self.config = configparser.ConfigParser()
+        with self._config_lock:
+            self.config = configparser.ConfigParser()
         self._create_default_config()
 
     def check_devices_sync(self, current_time):
@@ -596,7 +784,7 @@ class AudioManager:
                 continue
 
             # Calculate current offset from reference
-            current_offset = (device.buffer_position - reference_device.buffer_position) / 44100
+            current_offset = (device.buffer_position - reference_device.buffer_position) / float(reference_device.sample_rate)
 
             # Check for drift from initial offset
             drift = abs(current_offset - device.initial_offset)

@@ -73,6 +73,10 @@ This setup allows you to isolate and capture audio from specific applications wh
 
    [Settings]
    device_count = 2
+   input_device = CABLE Output (VB-Audio Virtual Cable)
+   sample_rate = 48000
+   channels = 2
+   frames_per_buffer = 2048
    device_1_volume = 1.0
    device_1_latency = 0.08
    device_2_volume = 1.0
@@ -102,6 +106,7 @@ This setup allows you to isolate and capture audio from specific applications wh
    - Adjust the latency setting in settings.cfg (lower = less delay, but may cause stuttering)
    - Default latency is 0.0 seconds
    - Try values between 0.05 and 0.1 if experiencing issues
+   - After changing `sample_rate`, `channels`, or `frames_per_buffer`, restart the script
 
 3. **Application Crashes**
    - Check the logs in the `logs` directory for error details
@@ -116,9 +121,18 @@ This setup allows you to isolate and capture audio from specific applications wh
    - Avoid selecting `CABLE Input (VB-Audio Virtual Cable)` as an output device inside Audio Splitter unless you explicitly know you need it
    - If you hear echo after changing Windows audio routing, restart the script to reset internal buffers
 
+6. **Volume Too Low / Need 100% On Other Devices**
+   - Audio Splitter does not override Windows per-device volume or Volume Mixer settings; it applies only the per-device `device_N_volume` multiplier from `settings.cfg`
+   - Check Windows Sound settings for the relevant device levels (including `CABLE Output` recording level if you route through VB-Cable)
+
 ## Contributing
 
 Feel free to open issues or submit pull requests on GitHub.
+
+## Development
+
+- Install dev dependencies: `pip install -r requirements-dev.txt`
+- Run tests: `pytest`
 
 ## License
 
